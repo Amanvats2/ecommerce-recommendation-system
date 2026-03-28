@@ -31,7 +31,7 @@ def static_files(filename):
     return send_from_directory(FRONTEND_DIR, filename)
 
 # -------------------------
-# Load Dataset
+# Load Dataset (SAFE)
 # -------------------------
 
 df = pd.read_json(DATA_PATH, lines=True)
@@ -50,13 +50,11 @@ df["price"] = pd.to_numeric(df["price"], errors="coerce")
 df = df[["title", "brand", "price", "product_url", "image"]]
 
 df = df.dropna(subset=["title"])
-
 df["brand"] = df["brand"].fillna("Unknown")
-
 df = df.reset_index(drop=True)
 
 # -------------------------
-# Clean Title (remove brand words)
+# Clean Title
 # -------------------------
 
 df["title_clean"] = df["title"].str.lower()
@@ -68,25 +66,23 @@ df["title_clean"] = df.apply(
 )
 
 # -------------------------
-# Embedding Model
+# Lazy Load Model (IMPORTANT)
 # -------------------------
 
-model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+model = None
 
-texts = df["title_clean"].tolist()
-
-embeddings = model.encode(texts).astype("float32")
-
-index = faiss.IndexFlatL2(embeddings.shape[1])
-index.add(embeddings)
+def get_model():
+    global model
+    if model is None:
+        print("Loading model...")
+        model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+    return model
 
 # -------------------------
 # Attribute dictionaries
 # -------------------------
 
-colors = [
-    "white", "black", "blue", "red", "green", "yellow", "grey", "pink", "brown"
-]
+colors = ["white", "black", "blue", "red", "green", "yellow", "grey", "pink", "brown"]
 
 categories = {
     "tshirt": ["tshirt", "t-shirt", "tee"],
@@ -102,11 +98,7 @@ categories = {
 
 def parse_query(query):
     q = query.lower()
-    filters = {
-        "color": None,
-        "category": None,
-        "price": None
-    }
+    filters = {"color": None, "category": None, "price": None}
 
     for c in colors:
         if c in q:
@@ -143,18 +135,20 @@ def keyword_score(query, title, brand):
 
 @app.route("/search", methods=["POST"])
 def search():
-    query = request.json["query"]
+    model = get_model()
+
+    query = request.json.get("query", "")
     filters = parse_query(query)
     filtered_df = df
 
+    # Apply filters
     if filters["color"]:
         filtered_df = filtered_df[
             filtered_df["title_clean"].str.contains(filters["color"], case=False, regex=True)
         ]
 
     if filters["category"]:
-        words = categories[filters["category"]]
-        pattern = "|".join(words)
+        pattern = "|".join(categories[filters["category"]])
         filtered_df = filtered_df[
             filtered_df["title_clean"].str.contains(pattern, case=False, regex=True)
         ]
@@ -167,8 +161,10 @@ def search():
     if len(filtered_df) < 5:
         filtered_df = df
 
+    # Create embeddings dynamically (safe)
     texts = filtered_df["title_clean"].tolist()
     emb = model.encode(texts).astype("float32")
+
     idx = faiss.IndexFlatL2(emb.shape[1])
     idx.add(emb)
 
@@ -198,7 +194,9 @@ def search():
     return jsonify(output)
 
 # -------------------------
+# Run (LOCAL ONLY)
+# -------------------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
