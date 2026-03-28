@@ -1,6 +1,7 @@
-streamlit
 pandas
 numpy
 faiss-cpu
 sentence-transformers
 scikit-learn
+flask
+flask_cors
