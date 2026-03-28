@@ -1,13 +1,12 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import pandas as pd
-import numpy as np
 import faiss
 import re
 import os
 from sentence_transformers import SentenceTransformer
 
-print("App starting...")
+print("🚀 App starting...")
 
 app = Flask(__name__)
 CORS(app)
@@ -33,40 +32,50 @@ def static_files(filename):
     return send_from_directory(FRONTEND_DIR, filename)
 
 # -------------------------
-# SAFE Dataset Load
+# Lazy Dataset Load
 # -------------------------
 
-try:
-    print("Loading dataset...")
-    df = pd.read_json(DATA_PATH, lines=True)
-    print("Dataset loaded")
-except Exception as e:
-    print(" Dataset error:", e)
-    df = pd.DataFrame(columns=["title", "brand", "price", "product_url", "image"])
+df = None
 
-if not df.empty:
-    df = df.rename(columns={"product_name": "title", "sales_price": "price"})
+def get_data():
+    global df
+    if df is None:
+        try:
+            print("📦 Loading dataset...")
+            df = pd.read_json(DATA_PATH, lines=True)
 
-    df["image"] = df["large"].apply(
-        lambda x: x.split("|")[0] if isinstance(x, str) else None
-    )
+            df.rename(columns={
+                "product_name": "title",
+                "sales_price": "price"
+            }, inplace=True)
 
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+            df["image"] = df["large"].apply(
+                lambda x: x.split("|")[0] if isinstance(x, str) else None
+            )
 
-    df = df[["title", "brand", "price", "product_url", "image"]]
-    df = df.dropna(subset=["title"])
-    df["brand"] = df["brand"].fillna("Unknown")
-    df = df.reset_index(drop=True)
+            df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
-    df["title_clean"] = df["title"].str.lower()
-    df["title_clean"] = df.apply(
-        lambda x: x["title_clean"].replace(x["brand"].lower(), "")
-        if isinstance(x["brand"], str) else x["title_clean"],
-        axis=1
-    )
+            df = df[["title", "brand", "price", "product_url", "image"]]
+            df.dropna(subset=["title"], inplace=True)
+            df["brand"] = df["brand"].fillna("Unknown")
+            df.reset_index(drop=True, inplace=True)
+
+            df["title_clean"] = df["title"].str.lower()
+            df["title_clean"] = df.apply(
+                lambda x: x["title_clean"].replace(x["brand"].lower(), ""),
+                axis=1
+            )
+
+            print("✅ Dataset loaded")
+
+        except Exception as e:
+            print("❌ Dataset error:", e)
+            df = pd.DataFrame(columns=["title", "brand", "price", "product_url", "image"])
+
+    return df
 
 # -------------------------
-# Lazy Load Model
+# Lazy Model Load (LIGHT)
 # -------------------------
 
 model = None
@@ -74,8 +83,8 @@ model = None
 def get_model():
     global model
     if model is None:
-        print(" Loading lightweight model...")
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        print("🤖 Loading model...")
+        model = SentenceTransformer("all-MiniLM-L6-v2")  # lightweight
     return model
 
 # -------------------------
@@ -111,16 +120,6 @@ def parse_query(query):
 
     return filters
 
-def keyword_score(query, title, brand):
-    q_words = set(query.lower().split())
-    t_words = set(title.lower().split())
-    b_words = set(brand.lower().split()) if isinstance(brand, str) else set()
-
-    title_matches = len(q_words.intersection(t_words))
-    brand_only_matches = len(q_words.intersection(b_words) - t_words)
-
-    return title_matches - (0.8 * brand_only_matches)
-
 # -------------------------
 # API
 # -------------------------
@@ -128,6 +127,7 @@ def keyword_score(query, title, brand):
 @app.route("/search", methods=["POST"])
 def search():
     try:
+        df = get_data()
         model = get_model()
 
         query = request.json.get("query", "")
@@ -186,7 +186,7 @@ def search():
         return jsonify([])
 
     except Exception as e:
-        print("Search error:", e)
+        print("❌ Search error:", e)
         return jsonify({"error": "Something went wrong"}), 500
 
 # -------------------------
