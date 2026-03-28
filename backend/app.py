@@ -7,11 +7,13 @@ import re
 import os
 from sentence_transformers import SentenceTransformer
 
+print("App starting...")
+
 app = Flask(__name__)
 CORS(app)
 
 # -------------------------
-# Base Paths
+# Paths
 # -------------------------
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,42 +33,40 @@ def static_files(filename):
     return send_from_directory(FRONTEND_DIR, filename)
 
 # -------------------------
-# Load Dataset (SAFE)
+# SAFE Dataset Load
 # -------------------------
 
-df = pd.read_json(DATA_PATH, lines=True)
+try:
+    print("Loading dataset...")
+    df = pd.read_json(DATA_PATH, lines=True)
+    print("Dataset loaded")
+except Exception as e:
+    print(" Dataset error:", e)
+    df = pd.DataFrame(columns=["title", "brand", "price", "product_url", "image"])
 
-df = df.rename(columns={
-    "product_name": "title",
-    "sales_price": "price"
-})
+if not df.empty:
+    df = df.rename(columns={"product_name": "title", "sales_price": "price"})
 
-df["image"] = df["large"].apply(
-    lambda x: x.split("|")[0] if isinstance(x, str) else None
-)
+    df["image"] = df["large"].apply(
+        lambda x: x.split("|")[0] if isinstance(x, str) else None
+    )
 
-df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
-df = df[["title", "brand", "price", "product_url", "image"]]
+    df = df[["title", "brand", "price", "product_url", "image"]]
+    df = df.dropna(subset=["title"])
+    df["brand"] = df["brand"].fillna("Unknown")
+    df = df.reset_index(drop=True)
 
-df = df.dropna(subset=["title"])
-df["brand"] = df["brand"].fillna("Unknown")
-df = df.reset_index(drop=True)
-
-# -------------------------
-# Clean Title
-# -------------------------
-
-df["title_clean"] = df["title"].str.lower()
-
-df["title_clean"] = df.apply(
-    lambda x: x["title_clean"].replace(x["brand"].lower(), "")
-    if isinstance(x["brand"], str) else x["title_clean"],
-    axis=1
-)
+    df["title_clean"] = df["title"].str.lower()
+    df["title_clean"] = df.apply(
+        lambda x: x["title_clean"].replace(x["brand"].lower(), "")
+        if isinstance(x["brand"], str) else x["title_clean"],
+        axis=1
+    )
 
 # -------------------------
-# Lazy Load Model (IMPORTANT)
+# Lazy Load Model
 # -------------------------
 
 model = None
@@ -74,12 +74,12 @@ model = None
 def get_model():
     global model
     if model is None:
-        print("Loading model...")
-        model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+        print(" Loading lightweight model...")
+        model = SentenceTransformer("all-MiniLM-L6-v2")
     return model
 
 # -------------------------
-# Attribute dictionaries
+# Filters
 # -------------------------
 
 colors = ["white", "black", "blue", "red", "green", "yellow", "grey", "pink", "brown"]
@@ -91,10 +91,6 @@ categories = {
     "jeans": ["jeans", "denim"],
     "pants": ["pant", "trouser"]
 }
-
-# -------------------------
-# Query Parser
-# -------------------------
 
 def parse_query(query):
     q = query.lower()
@@ -115,10 +111,6 @@ def parse_query(query):
 
     return filters
 
-# -------------------------
-# Keyword Score
-# -------------------------
-
 def keyword_score(query, title, brand):
     q_words = set(query.lower().split())
     t_words = set(title.lower().split())
@@ -130,71 +122,75 @@ def keyword_score(query, title, brand):
     return title_matches - (0.8 * brand_only_matches)
 
 # -------------------------
-# Search API
+# API
 # -------------------------
 
 @app.route("/search", methods=["POST"])
 def search():
-    model = get_model()
+    try:
+        model = get_model()
 
-    query = request.json.get("query", "")
-    filters = parse_query(query)
-    filtered_df = df
-
-    # Apply filters
-    if filters["color"]:
-        filtered_df = filtered_df[
-            filtered_df["title_clean"].str.contains(filters["color"], case=False, regex=True)
-        ]
-
-    if filters["category"]:
-        pattern = "|".join(categories[filters["category"]])
-        filtered_df = filtered_df[
-            filtered_df["title_clean"].str.contains(pattern, case=False, regex=True)
-        ]
-
-    if filters["price"]:
-        filtered_df = filtered_df[
-            filtered_df["price"] <= filters["price"]
-        ]
-
-    if len(filtered_df) < 5:
+        query = request.json.get("query", "")
+        filters = parse_query(query)
         filtered_df = df
 
-    # Create embeddings dynamically (safe)
-    texts = filtered_df["title_clean"].tolist()
-    emb = model.encode(texts).astype("float32")
+        if not df.empty:
 
-    idx = faiss.IndexFlatL2(emb.shape[1])
-    idx.add(emb)
+            if filters["color"]:
+                filtered_df = filtered_df[
+                    filtered_df["title_clean"].str.contains(filters["color"], case=False)
+                ]
 
-    query_emb = model.encode([query]).astype("float32")
-    distances, indices = idx.search(query_emb, 8)
+            if filters["category"]:
+                pattern = "|".join(categories[filters["category"]])
+                filtered_df = filtered_df[
+                    filtered_df["title_clean"].str.contains(pattern, case=False)
+                ]
 
-    results = []
-    for rank, i in enumerate(indices[0]):
-        p = filtered_df.iloc[i]
-        semantic_score = 1 / (1 + distances[0][rank])
-        keyword = keyword_score(query, p["title"], p["brand"])
-        final_score = 0.7 * semantic_score + 0.3 * keyword
-        results.append((final_score, p))
+            if filters["price"]:
+                filtered_df = filtered_df[
+                    filtered_df["price"] <= filters["price"]
+                ]
 
-    results = sorted(results, key=lambda x: x[0], reverse=True)
+            if len(filtered_df) < 5:
+                filtered_df = df
 
-    output = []
-    for score, p in results:
-        output.append({
-            "title": p["title"],
-            "brand": p["brand"],
-            "price": int(p["price"]) if not pd.isna(p["price"]) else "N/A",
-            "url": p["product_url"],
-            "image": p["image"]
-        })
+            texts = filtered_df["title_clean"].tolist()
 
-    return jsonify(output)
+            emb = model.encode(texts).astype("float32")
+            idx = faiss.IndexFlatL2(emb.shape[1])
+            idx.add(emb)
+
+            query_emb = model.encode([query]).astype("float32")
+            distances, indices = idx.search(query_emb, 8)
+
+            results = []
+            for rank, i in enumerate(indices[0]):
+                p = filtered_df.iloc[i]
+                score = 1 / (1 + distances[0][rank])
+                results.append((score, p))
+
+            results = sorted(results, key=lambda x: x[0], reverse=True)
+
+            return jsonify([
+                {
+                    "title": p["title"],
+                    "brand": p["brand"],
+                    "price": int(p["price"]) if not pd.isna(p["price"]) else "N/A",
+                    "url": p["product_url"],
+                    "image": p["image"]
+                }
+                for score, p in results
+            ])
+
+        return jsonify([])
+
+    except Exception as e:
+        print("Search error:", e)
+        return jsonify({"error": "Something went wrong"}), 500
 
 # -------------------------
-# Run (LOCAL ONLY)
+# Local Run
 # -------------------------
 
 if __name__ == "__main__":
